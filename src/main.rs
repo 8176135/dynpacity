@@ -8,6 +8,7 @@ use std::{
 };
 use std::ffi::CString;
 use std::sync::atomic::{AtomicIsize, Ordering};
+use trayicon::MenuBuilder;
 use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageA, GetMessageA, MSG, WINDOWINFO};
 
 #[derive(Debug, Copy, Clone)]
@@ -21,7 +22,7 @@ struct LoopAllWindowParams {
 	active_hwnd: HWND,
 }
 
-const DIMMING_BRIGHTNESS: f32 = 0.5;
+const DIMMING_BRIGHTNESS: f32 = 0.75;
 static CURRENT_ACTIVE_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
 fn main() {
@@ -51,21 +52,18 @@ fn main() {
     //
     //
     // inputbot::handle_input_events();
+	let (s, r) = std::sync::mpsc::channel::<i32>();
+	let icon = include_bytes!("../favicon.ico");
+	let tray = trayicon::TrayIconBuilder::new()
+		.sender(s)
+		.icon_from_buffer(icon)
+		.tooltip("Cool window fader")
+		.menu(MenuBuilder::new().item("Quit", 0))
+		.build()
+		.unwrap();
 
 	ctrlc::set_handler(|| unsafe {
-		let data = Box::new(LoopAllWindowParams {
-			active_hwnd: WindowsAndMessaging::GetForegroundWindow(),
-			action: LoopAction::ResetAllWindows,
-		});
-		let raw_data = Box::into_raw(data);
-		let res = WindowsAndMessaging::EnumWindows(Some(loop_all_windows), LPARAM(raw_data as isize));
-		Box::from_raw(raw_data); // Cleanup memory
-		if res.as_bool() {
-			std::process::exit(0);
-		} else {
-			eprintln!("Failed to loop through all windows on exit");
-			std::process::exit(1);
-		}
+		cleanup_and_exit();
 	}).expect("Failed to set ctrl c handler");
 
 	unsafe {
@@ -92,6 +90,11 @@ fn main() {
 
 		while GetMessageA(&mut message, HWND(0), 0, 0).into() {
 			DispatchMessageA(&mut message);
+			if let Ok(val) = r.try_recv() {
+				if val == 0 {
+					cleanup_and_exit();
+				}
+			}
 		}
 	}
 }
@@ -116,6 +119,22 @@ unsafe extern "system" fn loop_all_windows(hwnd: HWND, param1: LPARAM) -> BOOL {
 
 const IGNORE_WINDOW_NAMES: [&str; 6] = ["", "Default IME", "MSCTFIME UI", "QTrayIconMessageWindow", "DWM Notification Window", "Windows Push Notifications Platform"];
 
+unsafe fn cleanup_and_exit() {
+	let data = Box::new(LoopAllWindowParams {
+		active_hwnd: WindowsAndMessaging::GetForegroundWindow(),
+		action: LoopAction::ResetAllWindows,
+	});
+	let raw_data = Box::into_raw(data);
+	let res = WindowsAndMessaging::EnumWindows(Some(loop_all_windows), LPARAM(raw_data as isize));
+	Box::from_raw(raw_data); // Cleanup memory
+	if res.as_bool() {
+		std::process::exit(0);
+	} else {
+		eprintln!("Failed to loop through all windows on exit");
+		std::process::exit(1);
+	}
+}
+
 unsafe fn filter_window(hwnd: HWND) -> bool {
 	// let mut win_info = WINDOWINFO::default();
 	// WindowsAndMessaging::GetWindowInfo(hwnd, &mut win_info);
@@ -123,7 +142,12 @@ unsafe fn filter_window(hwnd: HWND) -> bool {
 	let len = WindowsAndMessaging::GetWindowTextA(hwnd, PSTR(window_name.as_mut_ptr()), 63);
 	window_name.truncate(len as usize);
 	let window_name = CString::new(window_name).expect("Window name string has null byte?").to_string_lossy().to_string();
-	!IGNORE_WINDOW_NAMES.contains(&window_name.as_str())
+
+	let out = !IGNORE_WINDOW_NAMES.contains(&window_name.as_str());
+	if out {
+		dbg!(&window_name);
+	}
+	out
 }
 
 unsafe extern "system" fn active_window_change(

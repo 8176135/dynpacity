@@ -11,3 +11,4 @@ edition = "2018"
 windows = { version = "*", features = ["alloc", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_Foundation"] }
 #inputbot = "*"
 ctrlc = "*"
+trayicon = "*"
