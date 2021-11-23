@@ -1,14 +1,14 @@
-use windows::core;
 use windows::Win32::UI::Accessibility;
 use windows::Win32::UI::WindowsAndMessaging;
-use windows::Win32::Foundation::{HWND, BOOL, LPARAM};
+use windows::Win32::Foundation::{HWND, BOOL, LPARAM, PSTR};
 
 use std::{
     ops::{BitAnd, BitOr, BitXor, Not},
     time::Duration,
 };
+use std::ffi::CString;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageA, GetMessageA, MSG};
+use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageA, GetMessageA, MSG, WINDOWINFO};
 
 #[derive(Debug, Copy, Clone)]
 enum LoopAction {
@@ -99,6 +99,9 @@ fn main() {
 unsafe extern "system" fn loop_all_windows(hwnd: HWND, param1: LPARAM) -> BOOL {
 	let data = param1.0 as *mut LoopAllWindowParams;
 	if WindowsAndMessaging::IsWindowVisible(hwnd).as_bool() {
+		if !filter_window(hwnd) {
+			return true.into();
+		}
 		match (*data).action {
 			LoopAction::DimAllWindows => {
 				if (*data).active_hwnd != hwnd {
@@ -109,6 +112,18 @@ unsafe extern "system" fn loop_all_windows(hwnd: HWND, param1: LPARAM) -> BOOL {
 		}
 	}
 	return true.into()
+}
+
+const IGNORE_WINDOW_NAMES: [&str; 6] = ["", "Default IME", "MSCTFIME UI", "QTrayIconMessageWindow", "DWM Notification Window", "Windows Push Notifications Platform"];
+
+unsafe fn filter_window(hwnd: HWND) -> bool {
+	// let mut win_info = WINDOWINFO::default();
+	// WindowsAndMessaging::GetWindowInfo(hwnd, &mut win_info);
+	let mut window_name = vec![0; 64];
+	let len = WindowsAndMessaging::GetWindowTextA(hwnd, PSTR(window_name.as_mut_ptr()), 63);
+	window_name.truncate(len as usize);
+	let window_name = CString::new(window_name).expect("Window name string has null byte?").to_string_lossy().to_string();
+	!IGNORE_WINDOW_NAMES.contains(&window_name.as_str())
 }
 
 unsafe extern "system" fn active_window_change(
@@ -126,8 +141,12 @@ unsafe extern "system" fn active_window_change(
 		return;
 	}
 
-	reset_brightness_window(hwnd);
-	change_brightness_window(HWND(active_window), DIMMING_BRIGHTNESS);
+	if filter_window(hwnd) {
+		reset_brightness_window(hwnd);
+	}
+	if filter_window(HWND(active_window)) {
+		change_brightness_window(HWND(active_window), DIMMING_BRIGHTNESS);
+	}
 }
 
 unsafe fn change_brightness_window(hwnd: HWND, change_val: f32) {
