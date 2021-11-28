@@ -7,9 +7,10 @@ use std::{
     time::Duration,
 };
 use std::ffi::CString;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU8, Ordering};
 use trayicon::MenuBuilder;
 use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageA, GetMessageA, MSG, WINDOWINFO};
+use inputbot::KeybdKey as KK;
 
 #[derive(Debug, Copy, Clone)]
 enum LoopAction {
@@ -22,49 +23,35 @@ struct LoopAllWindowParams {
 	active_hwnd: HWND,
 }
 
-const DIMMING_BRIGHTNESS: f32 = 0.75;
+static DIMMING_VALUE: AtomicU8 = AtomicU8::new((0.75 * 255.0) as u8);
 static CURRENT_ACTIVE_WINDOW: AtomicIsize = AtomicIsize::new(0);
+static CONSOLE_WINDOW: AtomicIsize = AtomicIsize::new(0);
+
 
 fn main() {
-    // std::thread::sleep(Duration::from_millis(1000));
+    KK::Numrow3Key.bind(|| unsafe {
+        if KK::LControlKey.is_pressed() && KK::LShiftKey.is_pressed() {
+            cleanup_and_exit();
+        }
+    });
 
-    // KK::Numrow1Key.bind(|| {
-    //     // dbg!("EWOOWW");
-    //     if KK::LControlKey.is_pressed() && KK::LShiftKey.is_pressed() {
-    //         unsafe { change_brightness_window(-0.05) };
-    //     }
-    // });
-    //
-    // KK::Numrow2Key.bind(|| {
-    //     // dbg!("EWOOWW");
-    //     if KK::LControlKey.is_pressed() && KK::LShiftKey.is_pressed() {
-    //         unsafe { change_brightness_window(0.05) };
-    //     }
-    // });
-    //
-    // KK::Numrow3Key.bind(|| {
-    //     // dbg!("EWOOWW");
-    //     if KK::LControlKey.is_pressed() && KK::LShiftKey.is_pressed() {
-    //         unsafe { reset_brightness_window() };
-    //     }
-    // });
-    //
-    //
-    //
-    // inputbot::handle_input_events();
+	inputbot::handle_input_events();
 	let (s, r) = std::sync::mpsc::channel::<i32>();
 	let icon = include_bytes!("../favicon.ico");
 	let tray = trayicon::TrayIconBuilder::new()
 		.sender(s)
 		.icon_from_buffer(icon)
 		.tooltip("Cool window fader")
-		.menu(MenuBuilder::new().item("Quit", 0))
+		.menu(MenuBuilder::new()
+			.item("Quit", 0)
+		)
 		.build()
 		.unwrap();
 
 	ctrlc::set_handler(|| unsafe {
 		cleanup_and_exit();
 	}).expect("Failed to set ctrl c handler");
+	manage_console_window();
 
 	unsafe {
 		let active_window = WindowsAndMessaging::GetForegroundWindow();
@@ -75,6 +62,7 @@ fn main() {
 		});
 		let raw_data = Box::into_raw(data);
 		WindowsAndMessaging::EnumWindows(Some(loop_all_windows), LPARAM(raw_data as isize));
+
 		Box::from_raw(raw_data); // Cleanup memory
 		Accessibility::SetWinEventHook(
 			WindowsAndMessaging::EVENT_SYSTEM_FOREGROUND,
@@ -88,27 +76,60 @@ fn main() {
 
 		let mut message = MSG::default();
 
-		while GetMessageA(&mut message, HWND(0), 0, 0).into() {
-			DispatchMessageA(&mut message);
+		// let last_check_time
+
+		let mut last_timer_id;
+		while {
+			last_timer_id = WindowsAndMessaging::SetTimer(HWND(0), 0, 1000, None);
+			let quit = GetMessageA(&mut message, HWND(0), 0, 0).into();
+			WindowsAndMessaging::KillTimer(HWND(0), last_timer_id);
+			quit
+		} {
+			if message.hwnd.0 == 0 && message.message == WindowsAndMessaging::WM_TIMER && message.wParam.0 == last_timer_id {
+				// Timeout
+				// println!("Timeout!");
+			} else {
+				// println!("Actual message");
+				DispatchMessageA(&mut message);
+			}
+
 			if let Ok(val) = r.try_recv() {
 				if val == 0 {
 					cleanup_and_exit();
 				}
 			}
+
+			update_active_window(WindowsAndMessaging::GetForegroundWindow());
+
 		}
 	}
 }
 
+fn manage_console_window() {
+	unsafe {
+		let console_window = windows::Win32::System::Console::GetConsoleWindow();
+		println!("{:x}", console_window.0);
+		let console_win_visible = WindowsAndMessaging::IsWindowVisible(console_window).as_bool();
+		if console_win_visible { // Not launched from a virtual terminal (not sure about this actually)
+			let res = WindowsAndMessaging::ShowWindow(console_window, WindowsAndMessaging::SW_HIDE).as_bool();
+		}
+	}
+}
+
+unsafe extern "system" fn signal_handler(signal: i32) {
+	dbg!(signal);
+}
+
 unsafe extern "system" fn loop_all_windows(hwnd: HWND, param1: LPARAM) -> BOOL {
-	let data = param1.0 as *mut LoopAllWindowParams;
+	let data = (param1.0 as *mut LoopAllWindowParams).as_mut().expect("param1 is null");
 	if WindowsAndMessaging::IsWindowVisible(hwnd).as_bool() {
 		if !filter_window(hwnd) {
 			return true.into();
 		}
-		match (*data).action {
+		match data.action {
 			LoopAction::DimAllWindows => {
-				if (*data).active_hwnd != hwnd {
-					change_brightness_window(hwnd, DIMMING_BRIGHTNESS)
+				if data.active_hwnd != hwnd {
+					change_brightness_window(hwnd, DIMMING_VALUE.load(Ordering::Relaxed))
 				}
 			},
 			LoopAction::ResetAllWindows => reset_brightness_window(hwnd),
@@ -120,6 +141,7 @@ unsafe extern "system" fn loop_all_windows(hwnd: HWND, param1: LPARAM) -> BOOL {
 const IGNORE_WINDOW_NAMES: [&str; 6] = ["", "Default IME", "MSCTFIME UI", "QTrayIconMessageWindow", "DWM Notification Window", "Windows Push Notifications Platform"];
 
 unsafe fn cleanup_and_exit() {
+	println!("Exiting...");
 	let data = Box::new(LoopAllWindowParams {
 		active_hwnd: WindowsAndMessaging::GetForegroundWindow(),
 		action: LoopAction::ResetAllWindows,
@@ -144,36 +166,40 @@ unsafe fn filter_window(hwnd: HWND) -> bool {
 	let window_name = CString::new(window_name).expect("Window name string has null byte?").to_string_lossy().to_string();
 
 	let out = !IGNORE_WINDOW_NAMES.contains(&window_name.as_str());
-	if out {
-		dbg!(&window_name);
-	}
+	// if out {
+	// 	dbg!(&window_name);
+	// }
 	out
 }
 
 unsafe extern "system" fn active_window_change(
-    hwineventhook: Accessibility::HWINEVENTHOOK,
+    _hwineventhook: Accessibility::HWINEVENTHOOK,
     event: u32,
     hwnd: HWND,
-    idobject: i32,
-    idchild: i32,
-    ideventthread: u32,
-    dwmseventtime: u32,
+    _idobject: i32,
+    _idchild: i32,
+    _ideventthread: u32,
+    _dwmseventtime: u32,
 ) {
 	println!("Event: {}, HWND: {:x}", event, hwnd.0);
-	let active_window = CURRENT_ACTIVE_WINDOW.swap(hwnd.0, Ordering::SeqCst);
-	if active_window == hwnd.0 {
+	update_active_window(hwnd);
+}
+
+unsafe fn update_active_window(new_hwnd: HWND) {
+	let active_window = CURRENT_ACTIVE_WINDOW.swap(new_hwnd.0, Ordering::SeqCst);
+	if active_window == new_hwnd.0 {
 		return;
 	}
 
-	if filter_window(hwnd) {
-		reset_brightness_window(hwnd);
+	if filter_window(new_hwnd) {
+		reset_brightness_window(new_hwnd);
 	}
 	if filter_window(HWND(active_window)) {
-		change_brightness_window(HWND(active_window), DIMMING_BRIGHTNESS);
+		change_brightness_window(HWND(active_window), DIMMING_VALUE.load(Ordering::Relaxed));
 	}
 }
 
-unsafe fn change_brightness_window(hwnd: HWND, change_val: f32) {
+unsafe fn change_brightness_window(hwnd: HWND, opacity_val: u8) {
     // let active_window = WindowsAndMessaging::GetForegroundWindow();
     let existing_layer =
         WindowsAndMessaging::GetWindowLongA(hwnd, WindowsAndMessaging::GWL_EXSTYLE);
@@ -211,7 +237,7 @@ unsafe fn change_brightness_window(hwnd: HWND, change_val: f32) {
     let res = WindowsAndMessaging::SetLayeredWindowAttributes(
 		hwnd,
         u32::MAX,
-		(255.0 * change_val) as u8,
+		opacity_val,
         WindowsAndMessaging::LWA_ALPHA,
     );
 
@@ -227,7 +253,7 @@ unsafe fn reset_brightness_window(hwnd: HWND) {
     // let active_window = WindowsAndMessaging::GetForegroundWindow();
 
     // let existing_layer = WindowsAndMessaging::GetWindowLongA(active_window, WindowsAndMessaging::GWL_EXSTYLE);
-    let res = WindowsAndMessaging::SetLayeredWindowAttributes(
+    let _res = WindowsAndMessaging::SetLayeredWindowAttributes(
 		hwnd,
         u32::MAX,
         (1.0 * u8::MAX as f32) as u8,

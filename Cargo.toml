@@ -8,7 +8,7 @@ edition = "2018"
 
 
 [dependencies]
-windows = { version = "*", features = ["alloc", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_Foundation"] }
-#inputbot = "*"
+windows = { version = "*", features = ["alloc", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_Foundation", "Win32_System_Console"] }
+inputbot = { path = "InputBot" }
 ctrlc = "*"
 trayicon = "*"
