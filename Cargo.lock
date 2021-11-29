@@ -109,6 +109,7 @@ dependencies = [
 [[package]]
 name = "inputbot"
 version = "0.5.0"
+source = "git+https://github.com/8176135/InputBot?branch=optional_get_msg#404544aaac32b0e66e492fe4f3192d09f8859efc"
 dependencies = [
  "input",
  "libc",
